@@ -1,119 +1,166 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
+const cors = require('cors');
 const app = express();
 
 app.use(express.json());
+app.use(cors());
 
-let ADMINS = [];
-let USERS = [];
-let COURSES = [];
+const SECRET = 'SECr3t'; 
 
-const adminAuthentication = (req, res, next) => {
-  const { username, password } = req.headers;
+// Define mongoose schemas
+const userSchema = new mongoose.Schema({
+  username: {type: String},
+  password: String,
+  purchasedCourses: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Course' }]
+});
 
-  const admin = ADMINS.find(a => a.username === username && a.password === password);
-  if (admin) {
-    next();
+const adminSchema = new mongoose.Schema({
+  username: String,
+  password: String
+});
+
+const courseSchema = new mongoose.Schema({
+  title: String,
+  description: String,
+  price: Number,
+  imageLink: String,
+  published: Boolean
+});
+
+// Define mongoose models
+const User = mongoose.model('User', userSchema);
+const Admin = mongoose.model('Admin', adminSchema);
+const Course = mongoose.model('Course', courseSchema);
+
+const authenticateJwt = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader) {
+    const token = authHeader.split(' ')[1];
+    jwt.verify(token, SECRET, (err, user) => {
+      if (err) {
+        return res.sendStatus(403);
+      }
+      req.user = user;
+      next();
+    });
   } else {
-    res.status(403).json({ message: 'Admin authentication failed' });
+    res.sendStatus(401);
   }
 };
 
-const userAuthentication = (req, res, next) => {
-  const { username, password } = req.headers;
-  const user = USERS.find(u => u.username === username && u.password === password);
-  if (user) {
-    req.user = user;  
-    next();
-  } else {
-    res.status(403).json({ message: 'User authentication failed' });
-  }
-};
+// Connect to MongoDB
+mongoose.connect('mongodb+srv://ishitagrawal0207:lpdNBhlHhN8cuoER@cluster0.hg0xkl5.mongodb.net/courses', { useNewUrlParser: true, useUnifiedTopology: true, dbName: "courses" });
+
+app.get('/admin/me', authenticateJwt, (req,res) => {
+  res.json({
+    username: req.user.username
+  })
+})
 
 app.post('/admin/signup', (req, res) => {
-  const admin = req.body;
-  const existingAdmin = ADMINS.find(a => a.username === admin.username);
-  if (existingAdmin) {
-    res.status(403).json({ message: 'Admin already exists' });
+  const { username, password } = req.body;
+  function callback(admin) {
+    if (admin) {
+      res.status(403).json({ message: 'Admin already exists' });
+    } else {
+      const obj = { username: username, password: password };
+      const newAdmin = new Admin(obj);
+      newAdmin.save();
+      const token = jwt.sign({ username, role: 'admin' }, SECRET, { expiresIn: '1h' });
+      res.json({ message: 'Admin created successfully', token });
+    }
+
+  }
+  Admin.findOne({ username }).then(callback);
+});
+
+app.post('/admin/login', async (req, res) => {
+  const { username, password } = req.headers;
+  const admin = await Admin.findOne({ username, password });
+  if (admin) {
+    const token = jwt.sign({ username, role: 'admin' }, SECRET, { expiresIn: '1h' });
+    res.json({ message: 'Logged in successfully', token });
   } else {
-    ADMINS.push(admin);
-    res.json({ message: 'Admin created successfully' });
+    res.status(403).json({ message: 'Invalid username or password' });
   }
 });
 
-app.post('/admin/login', adminAuthentication, (req, res) => {
-  res.json({ message: 'Logged in successfully' });
-});
-
-app.post('/admin/courses', adminAuthentication, (req, res) => {
-  const course = req.body;
-
-  course.id = Date.now(); 
-  COURSES.push(course);
+app.post('/admin/courses', authenticateJwt, async (req, res) => {
+  const course = new Course(req.body);
+  await course.save();
   res.json({ message: 'Course created successfully', courseId: course.id });
 });
 
-app.put('/admin/courses/:courseId', adminAuthentication, (req, res) => {
-  const courseId = parseInt(req.params.courseId);
-  const course = COURSES.find(c => c.id === courseId);
+app.put('/admin/courses/:courseId', authenticateJwt, async (req, res) => {
+  const course = await Course.findByIdAndUpdate(req.params.courseId, req.body, { new: true });
   if (course) {
-    Object.assign(course, req.body);
     res.json({ message: 'Course updated successfully' });
   } else {
     res.status(404).json({ message: 'Course not found' });
   }
 });
 
-app.get('/admin/courses', adminAuthentication, (req, res) => {
-  res.json({ courses: COURSES });
+app.get('/admin/courses', authenticateJwt, async (req, res) => {
+  const courses = await Course.find({});
+  res.json({ courses });
 });
 
-app.post('/users/signup', (req, res) => {
-  const user = {
-    username: req.body.username,
-    password: req.body.password,
-    purchasedCourses: []
-  }
-  USERS.push(user);
-  res.json({ message: 'User created successfully' });
-});
-
-app.post('/users/login', userAuthentication, (req, res) => {
-  res.json({ message: 'Logged in successfully' });
-});
-
-app.get('/users/courses', userAuthentication, (req, res) => {
-  let filteredCourses = [];
-  for (let i = 0; i<COURSES.length; i++) {
-    if (COURSES[i].published) {
-      filteredCourses.push(COURSES[i]);
-    }
-  }
-  res.json({ courses: filteredCourses });
-});
-
-app.post('/users/courses/:courseId', userAuthentication, (req, res) => {
-  const courseId = Number(req.params.courseId);
-  const course = COURSES.find(c => c.id === courseId && c.published);
-  if (course) {
-    req.user.purchasedCourses.push(courseId);
-    res.json({ message: 'Course purchased successfully' });
+// User routes
+app.post('/users/signup', async (req, res) => {
+  const { username, password } = req.body;
+  const user = await User.findOne({ username });
+  if (user) {
+    res.status(403).json({ message: 'User already exists' });
   } else {
-    res.status(404).json({ message: 'Course not found or not available' });
+    const newUser = new User({ username, password });
+    await newUser.save();
+    const token = jwt.sign({ username, role: 'user' }, SECRET, { expiresIn: '1h' });
+    res.json({ message: 'User created successfully', token });
   }
 });
 
-app.get('/users/purchasedCourses', userAuthentication, (req, res) => {
-  var purchasedCourseIds = req.user.purchasedCourses; [1, 4];
-  var purchasedCourses = [];
-  for (let i = 0; i<COURSES.length; i++) {
-    if (purchasedCourseIds.indexOf(COURSES[i].id) !== -1) {
-      purchasedCourses.push(COURSES[i]);
+app.post('/users/login', async (req, res) => {
+  const { username, password } = req.headers;
+  const user = await User.findOne({ username, password });
+  if (user) {
+    const token = jwt.sign({ username, role: 'user' }, SECRET, { expiresIn: '1h' });
+    res.json({ message: 'Logged in successfully', token });
+  } else {
+    res.status(403).json({ message: 'Invalid username or password' });
+  }
+});
+
+app.get('/users/courses', authenticateJwt, async (req, res) => {
+  const courses = await Course.find({published: true});
+  res.json({ courses });
+});
+
+app.post('/users/courses/:courseId', authenticateJwt, async (req, res) => {
+  const course = await Course.findById(req.params.courseId);
+  console.log(course);
+  if (course) {
+    const user = await User.findOne({ username: req.user.username });
+    if (user) {
+      user.purchasedCourses.push(course);
+      await user.save();
+      res.json({ message: 'Course purchased successfully' });
+    } else {
+      res.status(403).json({ message: 'User not found' });
     }
+  } else {
+    res.status(404).json({ message: 'Course not found' });
   }
-
-  res.json({ purchasedCourses });
 });
 
-app.listen(3000, () => {
-  console.log('Server is listening on port 3000');
+app.get('/users/purchasedCourses', authenticateJwt, async (req, res) => {
+  const user = await User.findOne({ username: req.user.username }).populate('purchasedCourses');
+  if (user) {
+    res.json({ purchasedCourses: user.purchasedCourses || [] });
+  } else {
+    res.status(403).json({ message: 'User not found' });
+  }
 });
+
+app.listen(3000, () => console.log('Server running on port 3000'));
